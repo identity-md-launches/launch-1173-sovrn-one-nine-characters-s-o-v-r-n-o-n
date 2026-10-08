@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
-import {OG} from "./OG.sol";
-import {OGDistributor} from "./OGDistributor.sol";
-import {ISpepe} from "./Interfaces.sol";
+import {SovrnToken} from "./SovrnToken.sol";
+import {LifeForceVault} from "./LifeForceVault.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
@@ -13,16 +12,14 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 
 /// @notice Immutable ETH-only hook. Every fee is based on the actual AMM ETH delta.
-contract OGHook {
+contract SovrnHook {
     uint256 public constant WAD = 1e18;
     uint256 public constant NORMAL_FEE = 0.035e18;
     uint256 public constant DECAY = 60 minutes;
-    address public constant TEAM = 0x90738ABe9b04622Dc0b3d015a3964Cc7D1Fd1859;
-    address public constant COLLECTION = 0x999ce0CE8C5f7661e0c74a568FfE27CEB9177bDB;
     IPoolManager public immutable poolManager;
-    OG public immutable token;
+    SovrnToken public immutable token;
     address public immutable factory;
-    OGDistributor public immutable distributor;
+    LifeForceVault public immutable vault;
     uint256 public openedAt;
     bool public initialized;
     int24 public tickSpacing;
@@ -30,22 +27,10 @@ contract OGHook {
     bool private redeeming;
     uint256 private quotedFee;
     int128 private quotedNative;
-    uint256 public claimRewards;
-    uint256 public claimSurplus;
-    uint256 public claimTeam;
-    uint256 public teamCredit;
+    uint256 public claimFees;
     event PoolOpened(uint256 timestamp);
-    event FeeSplit(
-        address indexed router,
-        bool indexed buy,
-        uint256 grossETH,
-        uint256 rewards,
-        uint256 team,
-        uint256 surplus,
-        bool asClaim
-    );
+    event FeePaid(address indexed router, bool indexed buy, uint256 grossETH, uint256 fee, bool asClaim);
     event ClaimsRedeemed(uint256 amount);
-    event TeamPaid(uint256 amount);
     error Unauthorized();
     error WrongPool();
     error Busy();
@@ -53,7 +38,7 @@ contract OGHook {
     error QuoteResult(int128 nativeDelta);
     error QuoteMismatch();
 
-    constructor(IPoolManager manager_, OG token_, address factory_) {
+    constructor(IPoolManager manager_, SovrnToken token_, address factory_) {
         if (address(manager_).code.length == 0 || address(token_).code.length == 0 || factory_ == address(0)) {
             revert Unauthorized();
         }
@@ -61,7 +46,7 @@ contract OGHook {
         token = token_;
         factory = factory_;
         Hooks.validateHookPermissions(IHooks(address(this)), getHookPermissions());
-        distributor = new OGDistributor(token_, ISpepe(COLLECTION), manager_, address(this));
+        vault = new LifeForceVault(manager_, token_, address(this));
     }
     modifier onlyManager() {
         if (msg.sender != address(poolManager)) revert Unauthorized();
@@ -206,24 +191,16 @@ contract OGHook {
             fee = params.zeroForOne ? actual * rate / (WAD - rate) : actual * rate / WAD;
         }
         uint256 gross = params.zeroForOne ? actual + fee : actual;
-        uint256 team = gross / 100;
-        uint256 baseFee = gross * NORMAL_FEE / WAD;
-        uint256 normal = baseFee - team;
-        uint256 surplus = fee - baseFee;
         bool asClaim = address(poolManager).balance < fee;
         if (fee != 0) {
             if (asClaim) {
                 poolManager.mint(address(this), 0, fee);
-                claimRewards += normal;
-                claimSurplus += surplus;
-                claimTeam += team;
-                distributor.receiveFeeClaims(normal, surplus);
+                claimFees += fee;
             } else {
-                poolManager.take(key.currency0, address(this), fee);
-                _distribute(normal, surplus, team);
+                poolManager.take(key.currency0, address(vault), fee);
             }
         }
-        emit FeeSplit(sender, params.zeroForOne, gross, normal, team, surplus, asClaim);
+        emit FeePaid(sender, params.zeroForOne, gross, fee, asClaim);
         busy = false;
         return (IHooks.afterSwap.selector, specifiedETH ? int128(0) : _int128(fee));
     }
@@ -237,50 +214,22 @@ contract OGHook {
         return int128(int256(value));
     }
 
-    function _distribute(uint256 normal, uint256 surplus, uint256 team) private {
-        if (normal + surplus != 0) distributor.receiveFees{value: normal + surplus}(normal, surplus);
-        teamCredit += team;
-        _payTeam();
-    }
-
-    function _payTeam() private {
-        uint256 amount = teamCredit;
-        if (amount == 0) return;
-        teamCredit = 0;
-        (bool ok,) = TEAM.call{value: amount}("");
-        if (!ok) teamCredit = amount;
-        else emit TeamPaid(amount);
-    }
-
-    /// @notice Anyone can retry payment; the destination can never change.
-    function payTeam() external idle {
-        _payTeam();
-    }
-
-    /// @notice Redeem fallback ERC-6909 ETH claims after the swap router has settled its input.
+    /// @notice Anyone may redeem all fallback ETH claims to the immutable vault after settlement.
     function redeemFees() external idle {
-        uint256 normal = claimRewards;
-        uint256 surplus = claimSurplus;
-        uint256 team = claimTeam;
-        if (normal + surplus + team == 0) return;
-        claimRewards = 0;
-        claimSurplus = 0;
-        claimTeam = 0;
+        uint256 amount = claimFees;
+        if (amount == 0) return;
+        claimFees = 0;
         redeeming = true;
-        poolManager.unlock(abi.encode(normal, surplus, team));
+        poolManager.unlock(abi.encode(amount));
         redeeming = false;
     }
 
     function unlockCallback(bytes calldata data) external onlyManager returns (bytes memory) {
         if (!redeeming || !busy) revert Unauthorized();
-        (uint256 normal, uint256 surplus, uint256 team) = abi.decode(data, (uint256, uint256, uint256));
-        uint256 total = normal + surplus + team;
-        poolManager.burn(address(this), 0, total);
-        poolManager.take(Currency.wrap(address(0)), address(this), total);
-        if (normal + surplus != 0) distributor.fundFeeClaims{value: normal + surplus}();
-        teamCredit += team;
-        _payTeam();
-        emit ClaimsRedeemed(total);
+        uint256 amount = abi.decode(data, (uint256));
+        poolManager.burn(address(this), 0, amount);
+        poolManager.take(Currency.wrap(address(0)), address(vault), amount);
+        emit ClaimsRedeemed(amount);
         return "";
     }
 

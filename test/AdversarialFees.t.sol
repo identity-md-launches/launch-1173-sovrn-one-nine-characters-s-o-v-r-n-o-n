@@ -6,7 +6,7 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {SystemBase} from "./SystemBase.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
-import {OGHook} from "src/OGHook.sol";
+import {SovrnHook} from "src/SovrnHook.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
@@ -14,16 +14,15 @@ import {Currency} from "v4-core/src/types/Currency.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 
 abstract contract FeeAssertions is SystemBase {
-    bytes32 internal constant FEE_EVENT = keccak256("FeeSplit(address,bool,uint256,uint256,uint256,uint256,bool)");
+    bytes32 internal constant FEE_EVENT = keccak256("FeePaid(address,bool,uint256,uint256,bool)");
     bytes32 internal constant SWAP_EVENT =
         keccak256("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
 
     function _assertSettledFee(bool buy, int256 amount, uint160 limit) internal {
         uint256 payerETH = address(this).balance;
-        uint256 payerOG = token.balanceOf(address(this));
+        uint256 payerSVO = token.balanceOf(address(this));
         uint256 managerETH = address(manager).balance;
-        uint256 teamETH = hook.TEAM().balance;
-        uint256 rewardETH = address(dist).balance;
+        uint256 vaultETH = address(vault).balance;
         uint256 burned = token.totalBurned();
         vm.recordLogs();
         BalanceDelta delta = _trade(buy, amount, limit);
@@ -31,53 +30,45 @@ abstract contract FeeAssertions is SystemBase {
         uint256 fees;
         bool sawSwap;
         int128 ammETH;
-        int128 ammOG;
+        int128 ammSVO;
         uint256 gross;
-        uint256 rewards;
-        uint256 team;
-        uint256 surplus;
+        uint256 paidFee;
         for (uint256 i; i < entries.length; ++i) {
             if (entries[i].emitter == address(manager) && entries[i].topics[0] == SWAP_EVENT) {
                 // recordLogs includes logs from reverted quote frames; the final Swap is the settled one.
-                (ammETH, ammOG,,,,) = abi.decode(entries[i].data, (int128, int128, uint160, uint128, int24, uint24));
+                (ammETH, ammSVO,,,,) = abi.decode(entries[i].data, (int128, int128, uint160, uint128, int24, uint24));
                 sawSwap = true;
             }
             if (entries[i].emitter != address(hook) || entries[i].topics[0] != FEE_EVENT) continue;
             ++fees;
             bool claims;
-            (gross, rewards, team, surplus, claims) =
-                abi.decode(entries[i].data, (uint256, uint256, uint256, uint256, bool));
+            (gross, paidFee, claims) = abi.decode(entries[i].data, (uint256, uint256, bool));
             assertEq(address(uint160(uint256(entries[i].topics[1]))), address(router));
             assertEq(uint256(entries[i].topics[2]), buy ? 1 : 0);
             assertFalse(claims, "funded fixture must settle directly");
         }
         assertEq(fees, 1, "quote must not persist fee events");
         assertTrue(sawSwap);
-        uint256 paidFee = rewards + team + surplus;
         assertEq(int256(delta.amount0()), int256(ammETH) - int256(paidFee));
-        assertEq(delta.amount1(), ammOG);
+        assertEq(delta.amount1(), ammSVO);
         uint256 rate = buy ? hook.launchFeeNow() : 35e15;
         assertEq(paidFee, gross * rate / 1e18, "fee on actual gross ETH");
-        assertEq(team, gross / 100, "team receives 1% even during protection");
-        assertEq(rewards, gross * 35 / 1000 - team, "normal distributor split");
-        assertEq(hook.TEAM().balance - teamETH, team);
-        assertEq(address(dist).balance - rewardETH, rewards + surplus);
-        assertEq(token.totalBurned(), burned, "swaps do not tax OG transfers");
+        assertEq(address(vault).balance - vaultETH, paidFee);
+        assertEq(token.totalBurned(), burned, "swaps do not tax SVO transfers");
         assertEq(token.balanceOf(address(hook)), 0);
-        assertEq(token.balanceOf(address(dist)), 0);
+        assertEq(token.balanceOf(address(vault)), 0);
         assertEq(address(hook).balance, 0);
         assertEq(address(router).balance, 0);
         if (buy) {
             assertEq(payerETH - address(this).balance, gross);
             assertEq(uint256(-int256(delta.amount0())), gross);
-            assertEq(token.balanceOf(address(this)) - payerOG, uint256(int256(delta.amount1())));
+            assertEq(token.balanceOf(address(this)) - payerSVO, uint256(int256(delta.amount1())));
             assertEq(address(manager).balance + paidFee, managerETH + gross);
         } else {
             assertEq(address(this).balance - payerETH, gross - paidFee);
             assertEq(uint256(int256(delta.amount0())), gross - paidFee);
-            assertEq(payerOG - token.balanceOf(address(this)), uint256(-int256(delta.amount1())));
+            assertEq(payerSVO - token.balanceOf(address(this)), uint256(-int256(delta.amount1())));
             assertEq(managerETH - address(manager).balance, gross);
-            assertEq(surplus, 0, "sells are never subject to launch protection");
         }
     }
 }
@@ -86,7 +77,7 @@ contract AdversarialFeesTest is FeeAssertions {
     using StateLibrary for IPoolManager;
 
     function setUp() public {
-        _systemAtPrice(true, true, LAUNCH_PRICE, 1e21);
+        _systemAtPrice(true, LAUNCH_PRICE, 1e21);
     }
 
     /// forge-config: default.fuzz.runs = 1000
@@ -145,7 +136,7 @@ contract AdversarialFeesTest is FeeAssertions {
         (uint256 growth0, uint256 growth1) = m.getFeeGrowthGlobals(key.toId());
         (uint256 expected0, uint256 expected1) = m.getFeeGrowthGlobals(other.toId());
         assertEq(growth0, expected0, "quote persisted native LP fees");
-        assertEq(growth1, expected1, "quote persisted OG LP fees");
+        assertEq(growth1, expected1, "quote persisted SovrnToken LP fees");
     }
 
     function test_callbackRejectsZeroAndNarrowingOverflow() public {
@@ -153,7 +144,7 @@ contract AdversarialFeesTest is FeeAssertions {
             [int256(0), int256(type(int128).max) + 1, -int256(type(int128).max) - 1, type(int256).min];
         for (uint256 i; i < amounts.length; ++i) {
             vm.prank(address(manager));
-            vm.expectRevert(OGHook.InvalidAmount.selector);
+            vm.expectRevert(SovrnHook.InvalidAmount.selector);
             hook.beforeSwap(address(router), key, SwapParams(true, amounts[i], LAUNCH_PRICE / 2), "");
         }
         // A refused callback must not leave the hook busy.
@@ -169,48 +160,17 @@ contract AdversarialFeesTest is FeeAssertions {
             if (i == 3) bad.tickSpacing = 120;
             if (i == 4) bad.hooks = IHooks(ALICE);
             vm.prank(address(manager));
-            vm.expectRevert(OGHook.WrongPool.selector);
+            vm.expectRevert(SovrnHook.WrongPool.selector);
             hook.beforeSwap(address(router), bad, SwapParams(true, -1, LAUNCH_PRICE / 2), "");
+            vm.prank(address(manager));
+            vm.expectRevert(SovrnHook.WrongPool.selector);
+            hook.afterSwap(address(router), bad, SwapParams(true, -1, LAUNCH_PRICE / 2), BalanceDelta.wrap(0), "");
         }
         vm.prank(address(manager));
-        vm.expectRevert(OGHook.Unauthorized.selector);
+        vm.expectRevert(SovrnHook.Unauthorized.selector);
         hook.afterSwap(address(router), key, SwapParams(true, -1, LAUNCH_PRICE / 2), BalanceDelta.wrap(0), "");
         vm.prank(address(manager));
-        vm.expectRevert(OGHook.Unauthorized.selector);
+        vm.expectRevert(SovrnHook.Unauthorized.selector);
         hook.unlockCallback(abi.encode(1, 2, 3));
-    }
-}
-
-contract DeferredFeesAdversarialTest is SystemBase {
-    function test_claimAndDirectFeesMixedBeforeRedemption() public {
-        _systemAtPrice(false, true, LAUNCH_PRICE, 0);
-        router.liquidity(key, ModifyLiquidityParams(166200, 184200, 1e21, bytes32(0)));
-        _mint(ALICE, 1);
-        _mint(BOB, 2);
-        _activate(ALICE, 1, 1);
-        uint256 teamBefore = hook.TEAM().balance;
-        _trade(true, -0.001 ether);
-        assertEq(hook.claimSurplus(), 0.000465 ether);
-        assertEq(dist.unfundedFees(), 0.00049 ether);
-        _activate(BOB, 2, 3);
-        assertEq(dist.pending(2), 0);
-        // The second swap has native backing and distributes directly while old claims remain.
-        _trade(true, -0.001 ether);
-        assertEq(dist.pending(1), 0.00003 ether);
-        assertEq(dist.pending(2), 0.00002 ether);
-        uint256 pendingAlice = dist.pending(1);
-        uint256 pendingBob = dist.pending(2);
-        uint256 backlog = dist.backlogLeft();
-        vm.prank(BOB);
-        hook.redeemFees();
-        assertEq(dist.pending(1), pendingAlice);
-        assertEq(dist.pending(2), pendingBob);
-        assertEq(dist.backlogLeft(), backlog);
-        assertEq(dist.unfundedFees(), 0);
-        assertEq(manager.balanceOf(address(hook), 0), 0);
-        assertEq(hook.TEAM().balance - teamBefore, 0.00002 ether);
-        assertEq(address(dist).balance, pendingAlice + pendingBob + backlog);
-        hook.redeemFees();
-        assertEq(address(dist).balance, pendingAlice + pendingBob + backlog);
     }
 }

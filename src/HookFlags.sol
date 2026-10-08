@@ -17,7 +17,7 @@ library HookFlags {
     uint160 internal constant AFTER_ADD_LIQUIDITY_RETURN_DELTA = 1 << 1;
     uint160 internal constant AFTER_REMOVE_LIQUIDITY_RETURN_DELTA = 1;
     uint160 internal constant ALL = (1 << 14) - 1;
-    uint160 internal constant OG_FLAGS =
+    uint160 internal constant SOVRN_FLAGS =
         BEFORE_INITIALIZE | BEFORE_SWAP | AFTER_SWAP | BEFORE_SWAP_RETURN_DELTA | AFTER_SWAP_RETURN_DELTA;
 
     function flagsOf(address at) internal pure returns (uint160) {

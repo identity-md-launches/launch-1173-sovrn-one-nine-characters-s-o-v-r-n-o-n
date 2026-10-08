@@ -2,8 +2,8 @@
 pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {PrepareLaunch} from "../script/PrepareLaunch.s.sol";
-import {OG} from "../src/OG.sol";
-import {OGHook} from "../src/OGHook.sol";
+import {SovrnToken} from "../src/SovrnToken.sol";
+import {SovrnHook} from "../src/SovrnHook.sol";
 import {HookFlags} from "../src/HookFlags.sol";
 import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
@@ -13,8 +13,8 @@ import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 
 contract LaunchFactoryHarness {
-    function deployToken() external returns (OG) {
-        return new OG();
+    function deployToken() external returns (SovrnToken) {
+        return new SovrnToken();
     }
 
     function deploy(bytes memory code, bytes32 salt) external returns (address deployed) {
@@ -34,19 +34,18 @@ contract LaunchTest is Test {
     function test_realCreate2DeploymentInitializesAllContracts() public {
         PoolManager manager = new PoolManager(address(this));
         LaunchFactoryHarness factory = new LaunchFactoryHarness();
-        OG token = factory.deployToken();
+        SovrnToken token = factory.deployToken();
         PrepareLaunch p = new PrepareLaunch();
         bytes memory code = p.initCode(manager, token, address(factory));
         (bool found, bytes32 salt, address expected) = p.mine(address(factory), keccak256(code), 0, 200000);
         assertTrue(found);
-        assertTrue(HookFlags.matches(expected, HookFlags.OG_FLAGS));
-        OGHook hook = OGHook(payable(factory.deploy(code, salt)));
+        assertTrue(HookFlags.matches(expected, HookFlags.SOVRN_FLAGS));
+        SovrnHook hook = SovrnHook(payable(factory.deploy(code, salt)));
         assertEq(address(hook), expected);
         assertEq(token.balanceOf(address(factory)), 1e27);
-        assertGt(address(hook.distributor()).code.length, 0);
-        assertGt(address(hook.distributor().auction()).code.length, 0);
-        assertEq(hook.distributor().hook(), expected);
-        assertEq(hook.distributor().auction().distributor(), address(hook.distributor()));
+        assertGt(address(hook.vault()).code.length, 0);
+        assertEq(hook.vault().hook(), expected);
+        assertEq(address(hook.vault().token()), address(token));
         PoolKey memory key =
             PoolKey(Currency.wrap(address(0)), Currency.wrap(address(token)), 12500, 60, IHooks(expected));
         vm.expectRevert();
@@ -62,8 +61,7 @@ contract LaunchTest is Test {
         vm.expectRevert();
         factory.initialize(manager, key, INITIAL_PRICE);
         assertLe(expected.code.length, 24576);
-        assertLe(address(hook.distributor()).code.length, 24576);
-        assertLe(address(hook.distributor().auction()).code.length, 24576);
+        assertLe(address(hook.vault()).code.length, 24576);
         assertLe(code.length, 49152);
     }
 }

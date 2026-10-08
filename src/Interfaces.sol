@@ -1,18 +1,5 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
-import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-
-interface ISpepe {
-    function ownerOf(uint256 id) external view returns (address);
-    function safeTransferFrom(address from, address to, uint256 id) external;
-    function transferFrom(address from, address to, uint256 id) external;
-    function totalMinted() external view returns (uint256);
-}
-
-interface IOGPool {
-    function poolKey() external view returns (PoolKey memory);
-    function redeemFees() external;
-}
 
 abstract contract Guard {
     uint256 private entered;

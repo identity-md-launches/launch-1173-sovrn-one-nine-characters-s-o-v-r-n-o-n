@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
-import {OGHook} from "../src/OGHook.sol";
-import {OG} from "../src/OG.sol";
+import {SovrnHook} from "../src/SovrnHook.sol";
+import {SovrnToken} from "../src/SovrnToken.sol";
 import {HookFlags} from "../src/HookFlags.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 
 /// @notice Offline preparation helper. No broadcasts, environment variables, signing, or admin keys.
 /// @dev The launch factory supplies its manager and the token it just deployed. Constructor creates
-///      distributor and auction automatically; there are no post-launch configuration transactions.
+///      the immutable LifeForceVault automatically; there are no post-launch configuration transactions.
 contract PrepareLaunch {
-    function initCode(IPoolManager manager, OG token, address factory) public pure returns (bytes memory) {
-        return abi.encodePacked(type(OGHook).creationCode, abi.encode(manager, token, factory));
+    function initCode(IPoolManager manager, SovrnToken token, address factory) public pure returns (bytes memory) {
+        return abi.encodePacked(type(SovrnHook).creationCode, abi.encode(manager, token, factory));
     }
 
     function predict(address create2Deployer, bytes32 salt, bytes32 initCodeHash) public pure returns (address) {
@@ -26,7 +26,7 @@ contract PrepareLaunch {
         for (uint256 i; i < attempts; ++i) {
             salt = bytes32(firstSalt + i);
             predicted = predict(create2Deployer, salt, initCodeHash);
-            if (HookFlags.matches(predicted, HookFlags.OG_FLAGS)) return (true, salt, predicted);
+            if (HookFlags.matches(predicted, HookFlags.SOVRN_FLAGS)) return (true, salt, predicted);
         }
     }
 }

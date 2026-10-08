@@ -5,7 +5,7 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
-import {OG} from "../src/OG.sol";
+import {SovrnToken} from "../src/SovrnToken.sol";
 
 contract PoolRouter {
     IPoolManager public immutable manager;
@@ -54,7 +54,7 @@ contract PoolRouter {
             if (Currency.unwrap(c) == address(0)) {
                 manager.settle{value: debt}();
             } else {
-                require(OG(Currency.unwrap(c)).transferFrom(payer, address(manager), debt));
+                require(SovrnToken(Currency.unwrap(c)).transferFrom(payer, address(manager), debt));
                 manager.settle();
             }
         } else if (amount > 0) {

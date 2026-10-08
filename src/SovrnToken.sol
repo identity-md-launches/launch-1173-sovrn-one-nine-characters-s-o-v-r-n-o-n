@@ -2,9 +2,9 @@
 pragma solidity 0.8.26;
 
 /// @notice Fixed launch supply. Burning is an ordinary transfer to DEAD, never a supply reduction.
-contract OG {
-    string public constant name = "OG";
-    string public constant symbol = "OG";
+contract SovrnToken {
+    string public constant name = "SOVRN.ONE";
+    string public constant symbol = "SVO";
     uint8 public constant decimals = 18;
     uint256 public constant totalSupply = 1_000_000_000 ether;
     address public constant DEAD = 0x000000000000000000000000000000000000dEaD;
