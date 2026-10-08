@@ -165,7 +165,11 @@ contract VaultModelInvariantTest is Test {
         handler.withdraw(uint96(b), false);
         handler.burn();
         handler.assertModel();
-        assertEq(MockIMD(0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127).balanceOf(address(handler.vault())), 0, "all recorded funds remain withdrawable");
+        assertEq(
+            MockIMD(0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127).balanceOf(address(handler.vault())),
+            0,
+            "all recorded funds remain withdrawable"
+        );
         assertEq(handler.vault().sovrnHeld(), 0);
     }
 }

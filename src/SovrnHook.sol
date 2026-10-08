@@ -106,8 +106,7 @@ contract SovrnHook {
         if (
             initialized || sender != factory || Currency.unwrap(key.currency0) != Currency.unwrap(_currency0())
                 || Currency.unwrap(key.currency1) != Currency.unwrap(_currency1()) || key.fee != 12_500
-                || key.tickSpacing <= 0
-                || address(key.hooks) != address(this)
+                || key.tickSpacing <= 0 || address(key.hooks) != address(this)
         ) revert WrongPool();
         initialized = true;
         tickSpacing = key.tickSpacing;

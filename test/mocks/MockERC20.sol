@@ -46,7 +46,9 @@ contract MockIMD is ERC20 {
         if (returnFalse) return false;
         balanceOf[msg.sender] -= amount;
         uint256 fee = amount * feeBps / 10_000;
-        unchecked { balanceOf[to] += amount - fee; }
+        unchecked {
+            balanceOf[to] += amount - fee;
+        }
         totalSupply -= fee;
         emit Transfer(msg.sender, to, amount - fee);
         if (to == callbackTarget && to.code.length > 0) IIMDReceiver(to).tokensReceived(amount - fee);
@@ -60,7 +62,9 @@ contract MockIMD is ERC20 {
         if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
         balanceOf[from] -= amount;
         uint256 fee = amount * feeBps / 10_000;
-        unchecked { balanceOf[to] += amount - fee; }
+        unchecked {
+            balanceOf[to] += amount - fee;
+        }
         totalSupply -= fee;
         emit Transfer(from, to, amount - fee);
         if (to == callbackTarget && to.code.length > 0) IIMDReceiver(to).tokensReceived(amount - fee);

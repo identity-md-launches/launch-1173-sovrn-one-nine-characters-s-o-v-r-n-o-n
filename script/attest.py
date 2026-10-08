@@ -35,9 +35,9 @@ def build_record():
         "permissions": ["beforeInitialize", "beforeSwap", "afterSwap", "beforeSwapReturnDelta", "afterSwapReturnDelta"],
     }
     assert manifest["pool"] == {
-        "pairedCurrency": "0x0000000000000000000000000000000000000000",
+        "pairedCurrency": "0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127",
         "fee": 12500, "tickSpacing": 60,
-        "initialPrice": "792281625142643375935439503360000",
+        "initialPrice": "45742400955009932534161870629490",
     }
     contracts = {}
     source_paths = set()
@@ -77,14 +77,14 @@ def build_record():
     return {
         "format": "sovrn-launch-build-v1",
         "status": "unsigned reproducible local build; no deployment or independent certification",
-        "chainId": 11155111,
+        "chainId": 4663,
         "kind": "univ4_hook",
         "compiler": "0.8.26+commit.8a97fa7a",
         "settings": {"evmVersion": "cancun", "viaIR": True, "optimizerRuns": 200, "bytecodeHash": "none"},
         "hookFlags": 8396,
         "hookConstructorArgs": manifest["hook"]["constructorArgs"],
         "pool": manifest["pool"],
-        "refuelSafe": "0xb1eC9d1C36974d05eb9889eBf8A150b05791E559",
+        "refuelSafe": "0xEb57c52272B90F989C41B739e2ccc5f00bF7697C",
         "vaultDeployment": "Created only by the SovrnHook constructor; discover through vault().",
         "initcodeNote": "Append ABI-encoded actual constructor arguments before hashing for CREATE2. Runtime immutables also depend on deployment addresses.",
         "sourceSha256": {p: sha256(p) for p in sorted(source_paths)},

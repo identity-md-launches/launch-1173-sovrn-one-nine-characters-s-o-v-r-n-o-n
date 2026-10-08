@@ -140,7 +140,8 @@ contract RevisionBoundariesTest is SystemBase {
         router.liquidity(hookless, ModifyLiquidityParams(-887220, 887220, 1e22, bytes32(0)));
         bool zeroForOne = _imdIsCurrency0();
         vm.prank(ALICE);
-        BalanceDelta delta = router.trade(hookless, SwapParams(zeroForOne, -1 ether, _orient(TickMath.MIN_SQRT_PRICE + 1)));
+        BalanceDelta delta =
+            router.trade(hookless, SwapParams(zeroForOne, -1 ether, _orient(TickMath.MIN_SQRT_PRICE + 1)));
         assertEq(_imdLeg(delta), -1 ether);
         assertGt(_svoLeg(delta), 0);
         assertEq(_vaultIMD(), 0);

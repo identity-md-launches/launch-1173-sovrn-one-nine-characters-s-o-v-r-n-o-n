@@ -68,7 +68,8 @@ contract FeeDifferentialTest is SystemBase {
         if (!buy && !exactInput) referenceAmount = int256(specified * 1e18 / (1e18 - rate));
         Currency input = Currency.wrap(buy ? IMD_ADDR : address(token));
         uint256 protocolBefore = manager.protocolFeesAccrued(input);
-        BalanceDelta amm = router.trade(referenceKey, SwapParams(buy == _imdIsCurrency0(), referenceAmount, _orient(limit)));
+        BalanceDelta amm =
+            router.trade(referenceKey, SwapParams(buy == _imdIsCurrency0(), referenceAmount, _orient(limit)));
         uint256 protocolAfterReference = manager.protocolFeesAccrued(input);
         uint256 imdMoved = uint256(buy ? -int256(_imdLeg(amm)) : int256(_imdLeg(amm)));
         uint256 expectedFee;

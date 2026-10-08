@@ -58,7 +58,7 @@ class AttestationTest(unittest.TestCase):
         self.assertIn("Wrote launch-attestation.json.", self.run_cli())
         self.assertIn("Launch manifest and attestation match the current build.", self.run_cli("--check"))
         record = json.loads(attest.OUTPUT.read_text())
-        self.assertEqual(record["chainId"], 11155111)
+        self.assertEqual(record["chainId"], 4663)
         self.assertEqual(record["deliverySha256"]["launch.json"],
                          hashlib.sha256((self.root / "launch.json").read_bytes()).hexdigest())
 
@@ -88,7 +88,7 @@ class AttestationTest(unittest.TestCase):
         self.assertTrue(expected <= record["deliverySha256"].keys())
 
     def test_extra_manifest_keys_are_rejected(self):
-        self.manifest["chainId"] = 11155111
+        self.manifest["chainId"] = 4663
         self.write_manifest()
         with self.assertRaises(AssertionError):
             self.run_cli()

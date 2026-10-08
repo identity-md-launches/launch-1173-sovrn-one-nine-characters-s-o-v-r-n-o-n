@@ -45,7 +45,9 @@ contract ReentrantIMD is ERC20 {
             recorder.record(ok, reason);
         }
         balanceOf[msg.sender] -= amount;
-        unchecked { balanceOf[to] += amount; }
+        unchecked {
+            balanceOf[to] += amount;
+        }
         emit Transfer(msg.sender, to, amount);
         return true;
     }

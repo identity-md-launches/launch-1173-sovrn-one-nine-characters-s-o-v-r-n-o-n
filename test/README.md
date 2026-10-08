@@ -1,3 +1,5 @@
+> **Historical.** This file records the swarm's review of the ETH-paired Sepolia delivery (IMD launch 1069). The contracts were then changed to an IMD pair (see the top-level README); the numbers, ETH references and chain id below describe the earlier ETH version and are kept as evidence, not as current documentation.
+
 # SOVRN.ONE test coverage
 
 This contribution extends the accepted tests for the IMD launch #1040 adaptation described in [the project README](../README.md). It changes only tests and test documentation. All integration fixtures deploy the **real vendored Uniswap v4 PoolManager locally**. No mock manager, live fork, network access, new dependency, environment injection, or configuration change is required.

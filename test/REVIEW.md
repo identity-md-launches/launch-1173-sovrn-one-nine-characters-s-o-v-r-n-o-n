@@ -1,3 +1,5 @@
+> **Historical.** This file records the swarm's review of the ETH-paired Sepolia delivery (IMD launch 1069). The contracts were then changed to an IMD pair (see the top-level README); the numbers, ETH references and chain id below describe the earlier ETH version and are kept as evidence, not as current documentation.
+
 # Implementation and regression notes
 
 Scope: SovrnToken, SovrnHook, LifeForceVault, HookFlags, the retained Guard, PrepareLaunch, launch metadata, and local integration tests. The requested behavior takes precedence over the imported base's distribution model. No dependency or build configuration changes were made.
