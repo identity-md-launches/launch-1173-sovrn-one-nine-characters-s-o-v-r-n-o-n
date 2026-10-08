@@ -5,7 +5,7 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
-import {SovrnToken} from "../src/SovrnToken.sol";
+import {ERC20} from "solmate/src/tokens/ERC20.sol";
 
 contract PoolRouter {
     IPoolManager public immutable manager;
@@ -47,16 +47,13 @@ contract PoolRouter {
         return abi.encode(d);
     }
 
+    /// @dev Both pool currencies are ERC-20 (SVO and IMD): pull what the pool is owed from the payer.
     function _settle(Currency c, address payer, int128 amount) private {
         if (amount < 0) {
             uint256 debt = uint256(-int256(amount));
             manager.sync(c);
-            if (Currency.unwrap(c) == address(0)) {
-                manager.settle{value: debt}();
-            } else {
-                require(SovrnToken(Currency.unwrap(c)).transferFrom(payer, address(manager), debt));
-                manager.settle();
-            }
+            require(ERC20(Currency.unwrap(c)).transferFrom(payer, address(manager), debt));
+            manager.settle();
         } else if (amount > 0) {
             manager.take(c, payer, uint256(uint128(amount)));
         }

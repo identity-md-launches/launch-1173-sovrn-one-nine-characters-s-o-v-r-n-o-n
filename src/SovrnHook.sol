@@ -6,19 +6,25 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {Currency} from "v4-core/src/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "v4-core/src/types/Currency.sol";
 import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 
-/// @notice Immutable ETH-only hook. Every fee is based on the actual AMM ETH delta.
+/// @notice Immutable IMD-fee hook for the SVO/IMD pool on Robinhood Chain. Every fee is paid in IMD (an ERC-20)
+///         and is based on the actual AMM IMD delta. The pool's currency order is fixed by the two addresses.
 contract SovrnHook {
     uint256 public constant WAD = 1e18;
     uint256 public constant NORMAL_FEE = 0.035e18;
     uint256 public constant DECAY = 60 minutes;
+    /// @notice IMD on Robinhood Chain (18 decimals). The only fee currency.
+    address public constant IMD = 0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127;
+    uint256 public constant CHAIN_ID = 4663;
     IPoolManager public immutable poolManager;
     SovrnToken public immutable token;
     address public immutable factory;
+    /// @notice True when IMD is the pool's currency0 (its address is lower than the token's).
+    bool public immutable imdIsCurrency0;
     LifeForceVault public immutable vault;
     uint256 public openedAt;
     bool public initialized;
@@ -26,25 +32,29 @@ contract SovrnHook {
     bool private busy;
     bool private redeeming;
     uint256 private quotedFee;
-    int128 private quotedNative;
+    int128 private quotedIMD;
     uint256 public claimFees;
     event PoolOpened(uint256 timestamp);
-    event FeePaid(address indexed router, bool indexed buy, uint256 grossETH, uint256 fee, bool asClaim);
+    event FeePaid(address indexed router, bool indexed buy, uint256 grossIMD, uint256 fee, bool asClaim);
     event ClaimsRedeemed(uint256 amount);
     error Unauthorized();
+    error WrongChain();
     error WrongPool();
     error Busy();
     error InvalidAmount();
-    error QuoteResult(int128 nativeDelta);
+    error QuoteResult(int128 imdDelta);
     error QuoteMismatch();
 
     constructor(IPoolManager manager_, SovrnToken token_, address factory_) {
-        if (address(manager_).code.length == 0 || address(token_).code.length == 0 || factory_ == address(0)) {
-            revert Unauthorized();
-        }
+        if (block.chainid != CHAIN_ID) revert WrongChain();
+        if (
+            address(manager_).code.length == 0 || address(token_).code.length == 0 || IMD.code.length == 0
+                || address(token_) == IMD || factory_ == address(0)
+        ) revert Unauthorized();
         poolManager = manager_;
         token = token_;
         factory = factory_;
+        imdIsCurrency0 = IMD < address(token_);
         Hooks.validateHookPermissions(IHooks(address(this)), getHookPermissions());
         vault = new LifeForceVault(manager_, token_, address(this));
     }
@@ -68,24 +78,35 @@ contract SovrnHook {
     }
 
     function poolKey() public view returns (PoolKey memory) {
-        return
-            PoolKey(
-                Currency.wrap(address(0)), Currency.wrap(address(token)), 12_500, tickSpacing, IHooks(address(this))
-            );
+        return PoolKey(_currency0(), _currency1(), 12_500, tickSpacing, IHooks(address(this)));
+    }
+
+    function _currency0() private view returns (Currency) {
+        return Currency.wrap(imdIsCurrency0 ? IMD : address(token));
+    }
+
+    function _currency1() private view returns (Currency) {
+        return Currency.wrap(imdIsCurrency0 ? address(token) : IMD);
+    }
+
+    /// @dev The IMD leg of a swap delta, whichever currency slot IMD occupies.
+    function _imdAmount(BalanceDelta delta) private view returns (int128) {
+        return imdIsCurrency0 ? delta.amount0() : delta.amount1();
     }
 
     function _checkPool(PoolKey calldata key) private view {
         if (
-            !initialized || Currency.unwrap(key.currency0) != address(0)
-                || Currency.unwrap(key.currency1) != address(token) || key.fee != 12_500
+            !initialized || Currency.unwrap(key.currency0) != Currency.unwrap(_currency0())
+                || Currency.unwrap(key.currency1) != Currency.unwrap(_currency1()) || key.fee != 12_500
                 || key.tickSpacing != tickSpacing || address(key.hooks) != address(this)
         ) revert WrongPool();
     }
 
     function beforeInitialize(address sender, PoolKey calldata key, uint160) external onlyManager returns (bytes4) {
         if (
-            initialized || sender != factory || Currency.unwrap(key.currency0) != address(0)
-                || Currency.unwrap(key.currency1) != address(token) || key.fee != 12_500 || key.tickSpacing <= 0
+            initialized || sender != factory || Currency.unwrap(key.currency0) != Currency.unwrap(_currency0())
+                || Currency.unwrap(key.currency1) != Currency.unwrap(_currency1()) || key.fee != 12_500
+                || key.tickSpacing <= 0
                 || address(key.hooks) != address(this)
         ) revert WrongPool();
         initialized = true;
@@ -108,7 +129,7 @@ contract SovrnHook {
         return elapsed >= DECAY ? 0 : (DECAY - elapsed + 59) / 60;
     }
 
-    /// @dev ETH specified: quote with a reverting self-call, then return only the actual ETH fee.
+    /// @dev IMD specified: quote with a reverting self-call, then return only the actual IMD fee.
     ///      No speculative state survives the quote. This supports price-limit partial fills without
     ///      charging a fee on unused input or unmet output. All other modes need no quote.
     function beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)
@@ -124,12 +145,14 @@ contract SovrnHook {
         ) revert InvalidAmount();
         busy = true;
         uint256 fee;
-        bool specifiedETH = params.zeroForOne == (params.amountSpecified < 0);
-        if (specifiedETH) {
-            uint256 rate = params.zeroForOne ? launchFeeNow() : NORMAL_FEE;
+        // A BUY pays IMD in (zeroForOne exactly when IMD is currency0); a SELL pays SVO in.
+        bool buy = params.zeroForOne == imdIsCurrency0;
+        bool specifiedIMD = buy == (params.amountSpecified < 0);
+        if (specifiedIMD) {
+            uint256 rate = buy ? launchFeeNow() : NORMAL_FEE;
             SwapParams memory quoteParams = params;
             uint256 requested = uint256(params.amountSpecified < 0 ? -params.amountSpecified : params.amountSpecified);
-            if (params.zeroForOne) {
+            if (buy) {
                 fee = requested * rate / WAD;
                 quoteParams.amountSpecified = -int256(requested - fee);
             } else {
@@ -137,21 +160,21 @@ contract SovrnHook {
                 if (gross > uint256(uint128(type(int128).max))) revert InvalidAmount();
                 quoteParams.amountSpecified = int256(gross);
             }
-            int128 nativeDelta = _quote(key, quoteParams);
-            uint256 actual = _abs(nativeDelta);
-            if (params.zeroForOne) {
+            int128 imdDelta = _quote(key, quoteParams);
+            uint256 actual = _abs(imdDelta);
+            if (buy) {
                 if (actual != uint256(-quoteParams.amountSpecified)) fee = actual * rate / (WAD - rate);
             } else {
                 fee = actual * rate / WAD;
             }
-            quotedNative = nativeDelta;
+            quotedIMD = imdDelta;
             quotedFee = fee;
         }
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(_int128(fee), 0), 0);
     }
 
     function _quote(PoolKey calldata key, SwapParams memory params) private returns (int128 value) {
-        try this.quoteNative(key, params) {
+        try this.quoteIMD(key, params) {
             revert QuoteMismatch();
         } catch (bytes memory reason) {
             if (reason.length != 36 || bytes4(reason) != QuoteResult.selector) {
@@ -163,10 +186,10 @@ contract SovrnHook {
 
     /// @dev Only this contract can quote. PoolManager skips callbacks for its own hook as sender.
     ///      Always reverts, rolling back the nested swap, its accounting, protocol fees and logs.
-    function quoteNative(PoolKey calldata key, SwapParams calldata params) external {
+    function quoteIMD(PoolKey calldata key, SwapParams calldata params) external {
         if (msg.sender != address(this) || !busy) revert Unauthorized();
         BalanceDelta result = poolManager.swap(key, params, "");
-        revert QuoteResult(result.amount0());
+        revert QuoteResult(_imdAmount(result));
     }
 
     function afterSwap(
@@ -178,31 +201,33 @@ contract SovrnHook {
     ) external onlyManager returns (bytes4, int128) {
         _checkPool(key);
         if (!busy) revert Unauthorized();
-        bool specifiedETH = params.zeroForOne == (params.amountSpecified < 0);
-        uint256 actual = _abs(delta.amount0());
-        uint256 rate = params.zeroForOne ? launchFeeNow() : NORMAL_FEE;
+        bool buy = params.zeroForOne == imdIsCurrency0;
+        bool specifiedIMD = buy == (params.amountSpecified < 0);
+        int128 imdDelta = _imdAmount(delta);
+        uint256 actual = _abs(imdDelta);
+        uint256 rate = buy ? launchFeeNow() : NORMAL_FEE;
         uint256 fee;
-        if (specifiedETH) {
-            if (delta.amount0() != quotedNative) revert QuoteMismatch();
+        if (specifiedIMD) {
+            if (imdDelta != quotedIMD) revert QuoteMismatch();
             fee = quotedFee;
             delete quotedFee;
-            delete quotedNative;
+            delete quotedIMD;
         } else {
-            fee = params.zeroForOne ? actual * rate / (WAD - rate) : actual * rate / WAD;
+            fee = buy ? actual * rate / (WAD - rate) : actual * rate / WAD;
         }
-        uint256 gross = params.zeroForOne ? actual + fee : actual;
-        bool asClaim = address(poolManager).balance < fee;
+        uint256 gross = buy ? actual + fee : actual;
+        bool asClaim = _imdBalanceOf(address(poolManager)) < fee;
         if (fee != 0) {
             if (asClaim) {
-                poolManager.mint(address(this), 0, fee);
+                poolManager.mint(address(this), CurrencyLibrary.toId(Currency.wrap(IMD)), fee);
                 claimFees += fee;
             } else {
-                poolManager.take(key.currency0, address(vault), fee);
+                poolManager.take(Currency.wrap(IMD), address(vault), fee);
             }
         }
-        emit FeePaid(sender, params.zeroForOne, gross, fee, asClaim);
+        emit FeePaid(sender, buy, gross, fee, asClaim);
         busy = false;
-        return (IHooks.afterSwap.selector, specifiedETH ? int128(0) : _int128(fee));
+        return (IHooks.afterSwap.selector, specifiedIMD ? int128(0) : _int128(fee));
     }
 
     function _abs(int128 value) private pure returns (uint256) {
@@ -214,7 +239,7 @@ contract SovrnHook {
         return int128(int256(value));
     }
 
-    /// @notice Anyone may redeem all fallback ETH claims to the immutable vault after settlement.
+    /// @notice Anyone may redeem all fallback IMD claims to the immutable vault after settlement.
     function redeemFees() external idle {
         uint256 amount = claimFees;
         if (amount == 0) return;
@@ -227,13 +252,15 @@ contract SovrnHook {
     function unlockCallback(bytes calldata data) external onlyManager returns (bytes memory) {
         if (!redeeming || !busy) revert Unauthorized();
         uint256 amount = abi.decode(data, (uint256));
-        poolManager.burn(address(this), 0, amount);
-        poolManager.take(Currency.wrap(address(0)), address(vault), amount);
+        poolManager.burn(address(this), CurrencyLibrary.toId(Currency.wrap(IMD)), amount);
+        poolManager.take(Currency.wrap(IMD), address(vault), amount);
         emit ClaimsRedeemed(amount);
         return "";
     }
 
-    receive() external payable {
-        if (msg.sender != address(poolManager)) revert Unauthorized();
+    function _imdBalanceOf(address who) private view returns (uint256) {
+        (bool ok, bytes memory data) = IMD.staticcall(abi.encodeWithSignature("balanceOf(address)", who));
+        if (!ok || data.length < 32) revert InvalidAmount();
+        return abi.decode(data, (uint256));
     }
 }

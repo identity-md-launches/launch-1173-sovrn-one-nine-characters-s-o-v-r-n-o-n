@@ -105,7 +105,7 @@ contract HookTest is SystemBase {
         vm.expectRevert(SovrnHook.Unauthorized.selector);
         hook.unlockCallback("");
         vm.expectRevert(SovrnHook.Unauthorized.selector);
-        hook.quoteNative(key, SwapParams(true, -1 ether, START_PRICE / 2));
+        hook.quoteIMD(key, SwapParams(true, -1 ether, START_PRICE / 2));
     }
 
     function test_wrongPoolRejected() public {
