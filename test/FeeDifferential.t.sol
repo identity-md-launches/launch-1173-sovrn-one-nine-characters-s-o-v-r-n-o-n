@@ -21,12 +21,11 @@ contract FeeDifferentialTest is SystemBase {
     PoolKey private referenceKey;
 
     function setUp() public {
-        vm.chainId(11155111);
         _systemAtPrice(true, LAUNCH_PRICE, 1e21);
         referenceKey = abi.decode(abi.encode(key), (PoolKey));
         referenceKey.hooks = IHooks(address(0));
-        manager.initialize(referenceKey, LAUNCH_PRICE);
-        router.liquidity{value: 1 ether}(referenceKey, ModifyLiquidityParams(-887220, 887220, 1e21, bytes32(0)));
+        manager.initialize(referenceKey, _orient(LAUNCH_PRICE));
+        router.liquidity(referenceKey, ModifyLiquidityParams(-887220, 887220, 1e21, bytes32(0)));
         manager.setProtocolFeeController(address(this));
         // Distinct, nonzero protocol fees in both directions exercise quote rollback.
         uint24 protocolFee = 500 | (uint24(1000) << 12);
@@ -52,12 +51,12 @@ contract FeeDifferentialTest is SystemBase {
         }
     }
 
-    function _compare(uint8 mode, uint256 nativeAmount, uint256 elapsed, uint256 limitBps) private {
+    function _compare(uint8 mode, uint256 imdAmount, uint256 elapsed, uint256 limitBps) private {
         bool buy = mode < 2;
         bool exactInput = mode % 2 == 0;
         vm.warp(hook.openedAt() + elapsed);
         uint256 rate = buy && elapsed < 3600 ? 35e15 + 465e15 * (3600 - elapsed) / 3600 : 35e15;
-        uint256 specified = buy == exactInput ? nativeAmount : nativeAmount * 100_000_000;
+        uint256 specified = buy == exactInput ? imdAmount : imdAmount * 100_000_000;
         int256 amount = exactInput ? -int256(specified) : int256(specified);
         uint160 limit = buy ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
         if (limitBps != 0) {
@@ -67,27 +66,27 @@ contract FeeDifferentialTest is SystemBase {
         int256 referenceAmount = amount;
         if (buy && exactInput) referenceAmount = -int256(specified - specified * rate / 1e18);
         if (!buy && !exactInput) referenceAmount = int256(specified * 1e18 / (1e18 - rate));
-        Currency input = buy ? key.currency0 : key.currency1;
+        Currency input = Currency.wrap(buy ? IMD_ADDR : address(token));
         uint256 protocolBefore = manager.protocolFeesAccrued(input);
-        BalanceDelta amm = router.trade{value: buy ? 1 ether : 0}(referenceKey, SwapParams(buy, referenceAmount, limit));
+        BalanceDelta amm = router.trade(referenceKey, SwapParams(buy == _imdIsCurrency0(), referenceAmount, _orient(limit)));
         uint256 protocolAfterReference = manager.protocolFeesAccrued(input);
-        uint256 nativeMoved = uint256(buy ? -int256(amm.amount0()) : int256(amm.amount0()));
+        uint256 imdMoved = uint256(buy ? -int256(_imdLeg(amm)) : int256(_imdLeg(amm)));
         uint256 expectedFee;
-        if (!buy) expectedFee = nativeMoved * rate / 1e18;
-        else if (exactInput && nativeMoved == uint256(-referenceAmount)) expectedFee = specified * rate / 1e18;
-        else expectedFee = nativeMoved * rate / (1e18 - rate);
+        if (!buy) expectedFee = imdMoved * rate / 1e18;
+        else if (exactInput && imdMoved == uint256(-referenceAmount)) expectedFee = specified * rate / 1e18;
+        else expectedFee = imdMoved * rate / (1e18 - rate);
 
-        uint256 vaultBefore = address(vault).balance;
-        uint256 managerBefore = address(manager).balance;
-        uint256 payerBefore = address(this).balance;
+        uint256 vaultBefore = _vaultIMD();
+        uint256 managerBefore = imd.balanceOf(address(manager));
+        uint256 payerBefore = imd.balanceOf(address(this));
         uint256 svoBefore = token.balanceOf(address(this));
         BalanceDelta actual = _trade(buy, amount, limit);
-        assertEq(int256(actual.amount0()), int256(amm.amount0()) - int256(expectedFee), "native delta");
-        assertEq(actual.amount1(), amm.amount1(), "fee must not tax SVO");
-        assertEq(int256(address(this).balance) - int256(payerBefore), int256(actual.amount0()));
-        assertEq(int256(token.balanceOf(address(this))) - int256(svoBefore), int256(actual.amount1()));
-        assertEq(int256(address(manager).balance) - int256(managerBefore), -int256(amm.amount0()));
-        assertEq(address(vault).balance - vaultBefore, expectedFee, "entire fee to vault");
+        assertEq(int256(_imdLeg(actual)), int256(_imdLeg(amm)) - int256(expectedFee), "IMD delta");
+        assertEq(_svoLeg(actual), _svoLeg(amm), "fee must not tax SVO");
+        assertEq(int256(imd.balanceOf(address(this))) - int256(payerBefore), int256(_imdLeg(actual)));
+        assertEq(int256(token.balanceOf(address(this))) - int256(svoBefore), int256(_svoLeg(actual)));
+        assertEq(int256(imd.balanceOf(address(manager))) - int256(managerBefore), -int256(_imdLeg(amm)));
+        assertEq(_vaultIMD() - vaultBefore, expectedFee, "entire fee to vault");
         assertEq(vault.buybackReserve(), expectedFee * 3 / 10);
         assertEq(vault.inferenceReserve(), expectedFee - expectedFee * 3 / 10);
         assertEq(hook.claimFees(), 0);
@@ -110,7 +109,14 @@ contract FeeDifferentialTest is SystemBase {
         assertFalse(m.isUnlocked());
         assertEq(m.currencyDelta(address(hook), key.currency0), 0);
         assertEq(m.currencyDelta(address(hook), key.currency1), 0);
-        assertEq(address(hook).balance, 0);
-        assertEq(address(router).balance, 0);
+        assertEq(imd.balanceOf(address(hook)), 0);
+        assertEq(token.balanceOf(address(hook)), 0);
+        assertEq(imd.balanceOf(address(router)), 0);
+    }
+}
+
+contract FeeDifferentialReversedTest is FeeDifferentialTest {
+    function _imdIsCurrency0() internal pure override returns (bool) {
+        return false;
     }
 }

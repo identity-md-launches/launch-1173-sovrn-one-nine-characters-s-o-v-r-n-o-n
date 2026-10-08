@@ -13,19 +13,41 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
-import {RejectETH} from "./Hook.t.sol";
+import {ERC20} from "solmate/src/tokens/ERC20.sol";
 
-contract HookReentryProbe {
-    SovrnHook private immutable hook;
+/// @dev Records the outcome of a re-entrant call made from inside IMD's transfer.
+contract ReentryRecorder {
     bool public succeeded;
     bytes public reason;
+    bool public called;
 
-    constructor(SovrnHook h) {
+    function record(bool ok, bytes calldata r) external {
+        called = true;
+        succeeded = ok;
+        reason = r;
+    }
+}
+
+/// @dev A hostile IMD: same ERC-20 storage layout as MockIMD (etched over it), but every transfer to the
+///      vault first tries to call hook.redeemFees() while the hook is mid-swap. No storage of its own.
+contract ReentrantIMD is ERC20 {
+    SovrnHook private immutable hook;
+    ReentryRecorder private immutable recorder;
+
+    constructor(SovrnHook h, ReentryRecorder r) ERC20("Identity.md", "IMD", 18) {
         hook = h;
+        recorder = r;
     }
 
-    receive() external payable {
-        (succeeded, reason) = address(hook).call(abi.encodeCall(hook.redeemFees, ()));
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        if (to == address(hook.vault())) {
+            (bool ok, bytes memory reason) = address(hook).call(abi.encodeCall(hook.redeemFees, ()));
+            recorder.record(ok, reason);
+        }
+        balanceOf[msg.sender] -= amount;
+        unchecked { balanceOf[to] += amount; }
+        emit Transfer(msg.sender, to, amount);
+        return true;
     }
 }
 
@@ -71,7 +93,7 @@ contract SecurityTest is SystemBase {
             fresh.beforeInitialize(i == 6 ? ALICE : address(this), bad, START_PRICE);
             assertFalse(fresh.initialized());
         }
-        manager.initialize(correct, START_PRICE);
+        manager.initialize(correct, _orient(START_PRICE));
         assertTrue(fresh.initialized());
         vm.prank(address(manager));
         vm.expectRevert(SovrnHook.WrongPool.selector);
@@ -85,6 +107,12 @@ contract SecurityTest is SystemBase {
         new SovrnHook(manager, SovrnToken(ALICE), address(this));
         vm.expectRevert(SovrnHook.Unauthorized.selector);
         new SovrnHook(manager, token, address(0));
+        vm.expectRevert(SovrnHook.Unauthorized.selector);
+        new SovrnHook(manager, SovrnToken(IMD_ADDR), address(this));
+        vm.chainId(1);
+        vm.expectRevert(SovrnHook.WrongChain.selector);
+        new SovrnHook(manager, token, address(this));
+        vm.chainId(4663);
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
         assertFalse(HookFlags.matches(predicted, HookFlags.SOVRN_FLAGS));
         vm.expectRevert(abi.encodeWithSelector(Hooks.HookAddressNotValid.selector, predicted));
@@ -97,28 +125,70 @@ contract SecurityTest is SystemBase {
         new LifeForceVault(manager, token, address(0));
     }
 
+    /// @dev IMD analogue of a vault that rejects ETH: a vault that refuses IMD makes the direct take revert.
     function test_directFeeRejectionRollsBackSwapAndBusyGuard() public {
-        bytes memory original = address(vault).code;
-        vm.etch(address(vault), address(new RejectETH()).code);
-        uint256 oldETH = address(manager).balance;
+        imd.setRefuses(address(vault), true);
+        uint256 oldIMD = imd.balanceOf(address(manager));
         uint256 oldTokens = token.balanceOf(address(this));
         vm.expectRevert();
         _trade(true, -1 ether);
-        assertEq(address(manager).balance, oldETH);
+        assertEq(imd.balanceOf(address(manager)), oldIMD);
         assertEq(token.balanceOf(address(this)), oldTokens);
         assertEq(hook.claimFees(), 0);
-        vm.etch(address(vault), original);
+        imd.setRefuses(address(vault), false);
         _trade(true, -1 ether);
-        assertEq(address(vault).balance, 0.5 ether);
+        assertEq(_vaultIMD(), 0.5 ether);
     }
 
-    function test_feeCallbackCannotReenterRedemption() public {
-        vm.etch(address(vault), address(new HookReentryProbe(hook)).code);
+    /// @dev IMD analogue of a false-returning/failed transfer: the swap reverts whole and recovers afterwards.
+    function test_imdReturningFalseRollsBackSwap() public {
+        imd.setReturnFalse(true);
+        uint256 oldIMD = imd.balanceOf(address(this));
+        vm.expectRevert();
         _trade(true, -1 ether);
-        HookReentryProbe probe = HookReentryProbe(payable(address(vault)));
-        assertFalse(probe.succeeded());
-        assertEq(probe.reason(), abi.encodeWithSelector(SovrnHook.Busy.selector));
-        assertEq(address(vault).balance, 0.5 ether);
+        assertEq(imd.balanceOf(address(this)), oldIMD);
+        assertEq(hook.claimFees(), 0);
+        assertEq(_vaultIMD(), 0);
+        imd.setReturnFalse(false);
+        _trade(true, -1 ether);
+        assertEq(_vaultIMD(), 0.5 ether);
+    }
+
+    /// @dev Replaces the ETH receive() re-entry probe: a hostile IMD calls redeemFees() from inside the fee
+    ///      transfer to the vault. The hook is mid-swap, so it reverts Busy.
+    function test_feeCallbackCannotReenterRedemption() public {
+        ReentryRecorder rec = new ReentryRecorder();
+        vm.etch(IMD_ADDR, address(new ReentrantIMD(hook, rec)).code);
+        _trade(true, -1 ether);
+        assertTrue(rec.called());
+        assertFalse(rec.succeeded());
+        assertEq(rec.reason(), abi.encodeWithSelector(SovrnHook.Busy.selector));
+        assertEq(_vaultIMD(), 0.5 ether);
+    }
+
+    /// @dev Every hook entry point reverts unless msg.sender is the PoolManager, so no token callback or
+    ///      outsider can drive the hook's swap/redeem state machine.
+    function test_hookCallbacksRejectEveryoneButThePoolManager() public {
+        SwapParams memory sp = SwapParams(true, -1 ether, _orient(START_PRICE / 2));
+        address[3] memory callers = [ALICE, address(vault), address(router)];
+        for (uint256 i; i < callers.length; ++i) {
+            vm.startPrank(callers[i]);
+            vm.expectRevert(SovrnHook.Unauthorized.selector);
+            hook.beforeInitialize(callers[i], key, START_PRICE);
+            vm.expectRevert(SovrnHook.Unauthorized.selector);
+            hook.beforeSwap(callers[i], key, sp, "");
+            vm.expectRevert(SovrnHook.Unauthorized.selector);
+            hook.afterSwap(callers[i], key, sp, BalanceDelta.wrap(0), "");
+            vm.expectRevert(SovrnHook.Unauthorized.selector);
+            hook.unlockCallback(abi.encode(uint256(1)));
+            vm.expectRevert(SovrnHook.Unauthorized.selector);
+            hook.quoteIMD(key, sp);
+            vm.stopPrank();
+        }
+        // Even the manager cannot run the redemption callback outside a redeemFees() call.
+        vm.prank(address(manager));
+        vm.expectRevert(SovrnHook.Unauthorized.selector);
+        hook.unlockCallback(abi.encode(uint256(1)));
     }
 
     function test_noAdministrationEvenForFactoryOrSafe() public {
@@ -163,5 +233,12 @@ contract SecurityTest is SystemBase {
             }
             assertTrue(op != 0xff && op != 0xf4 && op != 0xf2);
         }
+    }
+}
+
+/// @dev Same suite with IMD as the higher address (currency1).
+contract SecurityReversedTest is SecurityTest {
+    function _imdIsCurrency0() internal view override returns (bool) {
+        return false;
     }
 }

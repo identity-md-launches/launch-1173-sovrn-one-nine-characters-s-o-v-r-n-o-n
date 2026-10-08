@@ -8,8 +8,7 @@ import {PoolRouter} from "./PoolRouter.sol";
 import {SovrnHook} from "../src/SovrnHook.sol";
 import {SovrnToken} from "../src/SovrnToken.sol";
 import {LifeForceVault} from "../src/LifeForceVault.sol";
-import {Guard} from "../src/Interfaces.sol";
-import {RejectETH} from "./Hook.t.sol";
+import {MockIMD} from "./mocks/MockERC20.sol";
 import {ModifyLiquidityParams, SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 
@@ -18,7 +17,8 @@ contract LifecycleHandler is Test {
     LifeForceVault public immutable vault;
     SovrnToken public immutable token;
     PoolRouter private immutable router;
-    address private immutable rejectCode;
+    MockIMD private immutable imd;
+    bool private immutable imdIsCurrency0;
     uint256 public fees;
     uint256 public donations;
     uint256 public paid;
@@ -30,17 +30,22 @@ contract LifecycleHandler is Test {
         vault = h.vault();
         token = h.token();
         router = r;
-        rejectCode = address(new RejectETH());
+        imd = MockIMD(h.IMD());
+        imdIsCurrency0 = h.imdIsCurrency0();
         token.approve(address(r), type(uint256).max);
+        imd.approve(address(r), type(uint256).max);
     }
 
     function swap(uint96 raw, bool buy, bool exactInput) public {
-        uint256 nativeAmount = bound(raw, 1, 0.0001 ether);
-        int256 amount = int256(buy == exactInput ? nativeAmount : nativeAmount * 100_000_000);
+        uint256 imdAmount = bound(raw, 1, 0.0001 ether);
+        int256 amount = int256(buy == exactInput ? imdAmount : imdAmount * 100_000_000);
         if (exactInput) amount = -amount;
+        // A BUY pays IMD in: zeroForOne exactly when IMD is currency0.
+        bool zeroForOne = buy == imdIsCurrency0;
         vm.recordLogs();
-        router.trade{value: buy ? 1 ether : 0}(
-            hook.poolKey(), SwapParams(buy, amount, buy ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1)
+        router.trade(
+            hook.poolKey(),
+            SwapParams(zeroForOne, amount, zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1)
         );
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i; i < logs.length; ++i) {
@@ -66,10 +71,10 @@ contract LifecycleHandler is Test {
         uint256 amount = bound(raw, 0, 1 ether);
         donations += amount;
         if (forced) {
-            vm.deal(address(vault), address(vault).balance + amount);
+            // Credit the vault without a transfer call (as a seizure-free airdrop or rebase would).
+            deal(address(imd), address(vault), imd.balanceOf(address(vault)) + amount);
         } else {
-            (bool ok,) = address(vault).call{value: amount}("");
-            assertTrue(ok);
+            assertTrue(imd.transfer(address(vault), amount));
         }
     }
 
@@ -77,7 +82,7 @@ contract LifecycleHandler is Test {
         uint256 available = inference ? vault.inferenceReserve() : vault.buybackReserve();
         uint256 amount = bound(raw, 0, available);
         vm.prank(vault.REFUEL_SAFE());
-        if (rejecting && amount > 0) vm.expectRevert(Guard.ETHSendFailed.selector);
+        if (rejecting && amount > 0) vm.expectRevert(LifeForceVault.TransferFailed.selector);
         if (inference) vault.withdrawInference(amount);
         else vault.withdrawBuyback(amount);
         if (!rejecting) paid += amount;
@@ -85,7 +90,7 @@ contract LifecycleHandler is Test {
 
     function receiver(bool reject) public {
         rejecting = reject;
-        vm.etch(vault.REFUEL_SAFE(), reject ? rejectCode.code : bytes(""));
+        imd.setRefuses(vault.REFUEL_SAFE(), reject);
     }
 
     function moveAndBurn(uint96 raw, bool burnNow) public {
@@ -102,28 +107,29 @@ contract LifecycleHandler is Test {
         if (inference) vault.withdrawInference(raw);
         else vault.withdrawBuyback(raw);
     }
-
-    receive() external payable {}
 }
 
 /// forge-config: default.invariant.runs = 256
 /// forge-config: default.invariant.depth = 96
 /// forge-config: default.invariant.fail-on-revert = true
 contract LifecycleInvariantTest is SystemBase {
+    uint256 private constant IMD_ID = uint256(uint160(0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127));
     LifecycleHandler private handler;
     uint256 private initialSafe;
 
     function setUp() public {
         _systemAtPrice(false, LAUNCH_PRICE, 0);
-        router.liquidity(key, ModifyLiquidityParams(166200, 184200, 1e21, bytes32(0)));
-        initialSafe = vault.REFUEL_SAFE().balance;
+        // All-SVO range on the SVO side of the start price; mirrored when IMD is currency1.
+        (int24 lo, int24 hi) = _imdIsCurrency0() ? (int24(166200), int24(184200)) : (int24(-184200), int24(-166200));
+        router.liquidity(key, ModifyLiquidityParams(lo, hi, 1e21, bytes32(0)));
+        initialSafe = imd.balanceOf(vault.REFUEL_SAFE());
         handler = new LifecycleHandler(hook, router);
         token.transfer(address(handler), 300_000_000 ether);
-        vm.deal(address(handler), 1000 ether);
+        imd.transfer(address(handler), 1000 ether);
         // Begin every campaign with actual ERC-6909 claims from a tokens-only launch.
         handler.swap(0.0001 ether, true, true);
         assertGt(hook.claimFees(), 0);
-        router.liquidity{value: 10 ether}(key, ModifyLiquidityParams(-887220, 887220, 1e22, bytes32(0)));
+        router.liquidity(key, ModifyLiquidityParams(-887220, 887220, 1e22, bytes32(0)));
         bytes4[] memory selectors = new bytes4[](8);
         selectors[0] = handler.swap.selector;
         selectors[1] = handler.advance.selector;
@@ -138,13 +144,14 @@ contract LifecycleInvariantTest is SystemBase {
         targetSender(address(handler));
     }
 
-    function invariant_ETHAccountingAndOnlySafeReceivesWithdrawals() public view {
-        assertEq(address(vault).balance, vault.inferenceReserve() + vault.buybackReserve());
-        assertEq(address(vault).balance + hook.claimFees() + handler.paid(), handler.fees() + handler.donations());
-        assertEq(vault.REFUEL_SAFE().balance - initialSafe, handler.paid());
-        assertEq(manager.balanceOf(address(hook), 0), hook.claimFees());
-        assertEq(address(hook).balance, 0);
-        assertEq(address(router).balance, 0);
+    function invariant_IMDAccountingAndOnlySafeReceivesWithdrawals() public view {
+        assertEq(_vaultIMD(), vault.inferenceReserve() + vault.buybackReserve());
+        assertEq(_vaultIMD() + hook.claimFees() + handler.paid(), handler.fees() + handler.donations());
+        assertEq(imd.balanceOf(vault.REFUEL_SAFE()) - initialSafe, handler.paid());
+        assertEq(manager.balanceOf(address(hook), IMD_ID), hook.claimFees());
+        assertEq(imd.balanceOf(address(hook)), 0);
+        assertEq(imd.balanceOf(address(router)), 0);
+        assertEq(token.balanceOf(address(router)), 0);
     }
 
     function invariant_fixedSupplyAndEveryBurnConserved() public view {
@@ -163,9 +170,18 @@ contract LifecycleInvariantTest is SystemBase {
         handler.redeem();
         handler.withdraw(uint96(vault.inferenceReserve()), true);
         handler.withdraw(uint96(vault.buybackReserve()), false);
-        assertEq(address(vault).balance, 0);
+        assertEq(_vaultIMD(), 0);
         assertEq(hook.claimFees(), 0);
-        invariant_ETHAccountingAndOnlySafeReceivesWithdrawals();
+        invariant_IMDAccountingAndOnlySafeReceivesWithdrawals();
         invariant_fixedSupplyAndEveryBurnConserved();
+    }
+}
+
+/// forge-config: default.invariant.runs = 256
+/// forge-config: default.invariant.depth = 96
+/// forge-config: default.invariant.fail-on-revert = true
+contract LifecycleInvariantImdHigherTest is LifecycleInvariantTest {
+    function _imdIsCurrency0() internal view override returns (bool) {
+        return false;
     }
 }

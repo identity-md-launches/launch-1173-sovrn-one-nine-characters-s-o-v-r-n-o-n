@@ -19,24 +19,26 @@ abstract contract FeeAssertions is SystemBase {
         keccak256("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
 
     function _assertSettledFee(bool buy, int256 amount, uint160 limit) internal {
-        uint256 payerETH = address(this).balance;
+        uint256 payerIMD = imd.balanceOf(address(this));
         uint256 payerSVO = token.balanceOf(address(this));
-        uint256 managerETH = address(manager).balance;
-        uint256 vaultETH = address(vault).balance;
+        uint256 managerIMD = imd.balanceOf(address(manager));
+        uint256 vaultIMD = _vaultIMD();
         uint256 burned = token.totalBurned();
         vm.recordLogs();
         BalanceDelta delta = _trade(buy, amount, limit);
         Vm.Log[] memory entries = vm.getRecordedLogs();
         uint256 fees;
         bool sawSwap;
-        int128 ammETH;
+        int128 ammIMD;
         int128 ammSVO;
         uint256 gross;
         uint256 paidFee;
         for (uint256 i; i < entries.length; ++i) {
             if (entries[i].emitter == address(manager) && entries[i].topics[0] == SWAP_EVENT) {
                 // recordLogs includes logs from reverted quote frames; the final Swap is the settled one.
-                (ammETH, ammSVO,,,,) = abi.decode(entries[i].data, (int128, int128, uint160, uint128, int24, uint24));
+                (int128 a0, int128 a1,,,,) =
+                    abi.decode(entries[i].data, (int128, int128, uint160, uint128, int24, uint24));
+                (ammIMD, ammSVO) = _imdIsCurrency0() ? (a0, a1) : (a1, a0);
                 sawSwap = true;
             }
             if (entries[i].emitter != address(hook) || entries[i].topics[0] != FEE_EVENT) continue;
@@ -49,26 +51,27 @@ abstract contract FeeAssertions is SystemBase {
         }
         assertEq(fees, 1, "quote must not persist fee events");
         assertTrue(sawSwap);
-        assertEq(int256(delta.amount0()), int256(ammETH) - int256(paidFee));
-        assertEq(delta.amount1(), ammSVO);
+        assertEq(int256(_imdLeg(delta)), int256(ammIMD) - int256(paidFee));
+        assertEq(_svoLeg(delta), ammSVO);
         uint256 rate = buy ? hook.launchFeeNow() : 35e15;
-        assertEq(paidFee, gross * rate / 1e18, "fee on actual gross ETH");
-        assertEq(address(vault).balance - vaultETH, paidFee);
+        assertEq(paidFee, gross * rate / 1e18, "fee on actual gross IMD");
+        assertEq(_vaultIMD() - vaultIMD, paidFee);
         assertEq(token.totalBurned(), burned, "swaps do not tax SVO transfers");
         assertEq(token.balanceOf(address(hook)), 0);
         assertEq(token.balanceOf(address(vault)), 0);
-        assertEq(address(hook).balance, 0);
-        assertEq(address(router).balance, 0);
+        assertEq(imd.balanceOf(address(hook)), 0);
+        assertEq(imd.balanceOf(address(router)), 0);
+        assertEq(token.balanceOf(address(router)), 0);
         if (buy) {
-            assertEq(payerETH - address(this).balance, gross);
-            assertEq(uint256(-int256(delta.amount0())), gross);
-            assertEq(token.balanceOf(address(this)) - payerSVO, uint256(int256(delta.amount1())));
-            assertEq(address(manager).balance + paidFee, managerETH + gross);
+            assertEq(payerIMD - imd.balanceOf(address(this)), gross);
+            assertEq(uint256(-int256(_imdLeg(delta))), gross);
+            assertEq(token.balanceOf(address(this)) - payerSVO, uint256(int256(_svoLeg(delta))));
+            assertEq(imd.balanceOf(address(manager)) + paidFee, managerIMD + gross);
         } else {
-            assertEq(address(this).balance - payerETH, gross - paidFee);
-            assertEq(uint256(int256(delta.amount0())), gross - paidFee);
-            assertEq(payerSVO - token.balanceOf(address(this)), uint256(-int256(delta.amount1())));
-            assertEq(managerETH - address(manager).balance, gross);
+            assertEq(imd.balanceOf(address(this)) - payerIMD, gross - paidFee);
+            assertEq(uint256(int256(_imdLeg(delta))), gross - paidFee);
+            assertEq(payerSVO - token.balanceOf(address(this)), uint256(-int256(_svoLeg(delta))));
+            assertEq(managerIMD - imd.balanceOf(address(manager)), gross);
         }
     }
 }
@@ -85,8 +88,8 @@ contract AdversarialFeesTest is FeeAssertions {
         public
     {
         vm.warp(hook.openedAt() + bound(time, 0, 7200));
-        uint256 nativeAmount = bound(raw, 1, 0.01 ether);
-        int256 amount = int256(buy == exactInput ? nativeAmount : nativeAmount * 100_000_000);
+        uint256 imdAmount = bound(raw, 1, 0.01 ether);
+        int256 amount = int256(buy == exactInput ? imdAmount : imdAmount * 100_000_000);
         if (exactInput) amount = -amount;
         uint160 limit = limited
             ? (buy ? LAUNCH_PRICE * 9999 / 10000 : LAUNCH_PRICE * 10001 / 10000)
@@ -109,21 +112,24 @@ contract AdversarialFeesTest is FeeAssertions {
     function test_quoteLeavesSamePriceLiquidityAndLPGrowthAsUnhookedPool() public {
         PoolKey memory referenceKey = key;
         referenceKey.hooks = IHooks(address(0));
-        manager.initialize(referenceKey, LAUNCH_PRICE);
-        router.liquidity{value: 10 ether}(referenceKey, ModifyLiquidityParams(-887220, 887220, 1e21, bytes32(0)));
+        manager.initialize(referenceKey, _orient(LAUNCH_PRICE));
+        router.liquidity(referenceKey, ModifyLiquidityParams(-887220, 887220, 1e21, bytes32(0)));
         vm.warp(hook.openedAt() + 1 hours);
         BalanceDelta actual = _trade(true, -0.01 ether);
-        BalanceDelta referenceDelta = router.trade{value: 0.01 ether}(
-            referenceKey, SwapParams(true, -0.00965 ether, TickMath.MIN_SQRT_PRICE + 1)
-        );
-        assertEq(actual.amount1(), referenceDelta.amount1());
+        BalanceDelta referenceDelta = _refTrade(referenceKey, true, -0.00965 ether, TickMath.MIN_SQRT_PRICE + 1);
+        assertEq(_svoLeg(actual), _svoLeg(referenceDelta));
         _sameAMMState(referenceKey);
         actual = _trade(false, 0.001 ether);
         uint256 gross = uint256(0.001 ether) * 1000 / 965;
-        referenceDelta = router.trade(referenceKey, SwapParams(false, int256(gross), TickMath.MAX_SQRT_PRICE - 1));
-        assertEq(actual.amount1(), referenceDelta.amount1());
-        assertEq(actual.amount0(), 0.001 ether);
+        referenceDelta = _refTrade(referenceKey, false, int256(gross), TickMath.MAX_SQRT_PRICE - 1);
+        assertEq(_svoLeg(actual), _svoLeg(referenceDelta));
+        assertEq(_imdLeg(actual), 0.001 ether);
         _sameAMMState(referenceKey);
+    }
+
+    /// @dev Trade on the unhooked reference pool with the same buy/sell meaning and orientation as `_trade`.
+    function _refTrade(PoolKey memory k, bool buy, int256 amount, uint160 limit) private returns (BalanceDelta) {
+        return router.trade(k, SwapParams(buy == _imdIsCurrency0(), amount, _orient(limit)));
     }
 
     function _sameAMMState(PoolKey memory other) private view {
@@ -135,7 +141,7 @@ contract AdversarialFeesTest is FeeAssertions {
         assertEq(m.getLiquidity(key.toId()), m.getLiquidity(other.toId()));
         (uint256 growth0, uint256 growth1) = m.getFeeGrowthGlobals(key.toId());
         (uint256 expected0, uint256 expected1) = m.getFeeGrowthGlobals(other.toId());
-        assertEq(growth0, expected0, "quote persisted native LP fees");
+        assertEq(growth0, expected0, "quote persisted IMD-side LP fees");
         assertEq(growth1, expected1, "quote persisted SovrnToken LP fees");
     }
 
@@ -153,8 +159,8 @@ contract AdversarialFeesTest is FeeAssertions {
 
     function test_wrongPoolEveryBoundFieldAndUnpairedAfterSwap() public {
         for (uint256 i; i < 5; ++i) {
-            PoolKey memory bad = key;
-            if (i == 0) bad.currency0 = Currency.wrap(address(token));
+            PoolKey memory bad = abi.decode(abi.encode(key), (PoolKey));
+            if (i == 0) bad.currency0 = key.currency1;
             if (i == 1) bad.currency1 = Currency.wrap(ALICE);
             if (i == 2) bad.fee = 3000;
             if (i == 3) bad.tickSpacing = 120;
@@ -172,5 +178,11 @@ contract AdversarialFeesTest is FeeAssertions {
         vm.prank(address(manager));
         vm.expectRevert(SovrnHook.Unauthorized.selector);
         hook.unlockCallback(abi.encode(1, 2, 3));
+    }
+}
+
+contract AdversarialFeesReversedTest is AdversarialFeesTest {
+    function _imdIsCurrency0() internal pure override returns (bool) {
+        return false;
     }
 }
