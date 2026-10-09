@@ -50,9 +50,9 @@
     "src/SovrnToken.sol": "3632f774ca656fb45a0b69fadbf67f563134ab3aa1ae1ac97a5c31f04d62eda9"
   },
   "deliverySha256": {
-    "README.md": "18efe99ebad4fa62fd7cdd282b2d319113f5b08013725d99f6aecb5d305a313c",
+    "README.md": "a3500e371301b6b561e45df665d6c850496ee970d932a3ab730b6f49eb2a13ae",
     "foundry.toml": "5f446b93c5c705b0e749f4c539625d6aae6861c727e7d918a28004f67b7ac8b4",
-    "launch.json": "11a03e91c3a62b8655dd03290d1b5262f874fa1077e191083e04d172af47a99a",
+    "launch.json": "aaa6babff78663832a024eaf4abf140a0c45fd2c9ff1727c983347f90f2f7640",
     "script/PrepareLaunch.s.sol": "3822c5529150b454525ad479a693ba394d2dc645a73432d7b527fe91f26e31db",
     "script/attest.py": "d7890ec3cefe1999bd163f1bf083e86472128789c0f3704371499662193533be",
     "src/HookFlags.sol": "2a1abec22dd428c1981ced64e6530a4d993ffe89e8d8bcfb349079794ca9511f",
