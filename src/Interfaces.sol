@@ -10,11 +10,4 @@ abstract contract Guard {
         _;
         entered = 0;
     }
-    error ETHSendFailed();
-
-    function _sendETH(address to, uint256 amount) internal {
-        if (amount == 0) return;
-        (bool ok,) = to.call{value: amount}("");
-        if (!ok) revert ETHSendFailed();
-    }
 }

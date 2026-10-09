@@ -341,6 +341,69 @@ contract VaultTest is SystemBase {
         assertEq(imd.balanceOf(safe), 7 ether);
     }
 
+    /// @dev Audit finding 1: a permissionless sync() during a temporary shortfall must not rewrite the 70/30 split.
+    function test_syncDuringShortfallDoesNotRewriteSplit() public {
+        _fund(100 ether);
+        assertEq(vault.inferenceReserve(), 70 ether);
+        assertEq(vault.buybackReserve(), 30 ether);
+
+        vm.prank(address(vault));
+        imd.transfer(BOB, 30 ether);
+        assertEq(vault.inferenceReserve(), 70 ether);
+        assertEq(vault.buybackReserve(), 0);
+
+        vm.prank(BOB);
+        vault.sync(); // anyone may checkpoint while the balance is short
+        assertEq(vault.inferenceReserve(), 70 ether);
+        assertEq(vault.buybackReserve(), 0);
+
+        vm.prank(BOB);
+        imd.transfer(address(vault), 30 ether);
+        assertEq(vault.inferenceReserve(), 70 ether);
+        assertEq(vault.buybackReserve(), 30 ether);
+        vault.sync();
+        assertEq(vault.inferenceReserve(), 70 ether);
+        assertEq(vault.buybackReserve(), 30 ether);
+    }
+
+    /// @dev Same property for a Safe withdrawal made during the shortfall: it spends only what is really there,
+    ///      and the part of the checkpoint that was temporarily unbacked comes back when the IMD does.
+    function test_withdrawDuringShortfallKeepsUnbackedCheckpoint() public {
+        _fund(100 ether);
+        vm.prank(address(vault));
+        imd.transfer(BOB, 30 ether); // balance 70: views 70 / 0
+
+        vm.startPrank(safe);
+        vm.expectRevert(LifeForceVault.InvalidAmount.selector);
+        vault.withdrawBuyback(1);
+        vault.withdrawInference(20 ether);
+        vm.stopPrank();
+        assertEq(vault.inferenceReserve(), 50 ether);
+        assertEq(vault.buybackReserve(), 0);
+        assertEq(vault.inferenceReserve() + vault.buybackReserve(), _vaultIMD());
+
+        vm.prank(BOB);
+        imd.transfer(address(vault), 30 ether); // balance 80
+        assertEq(vault.inferenceReserve(), 50 ether);
+        assertEq(vault.buybackReserve(), 30 ether);
+        assertEq(vault.inferenceReserve() + vault.buybackReserve(), _vaultIMD());
+    }
+
+    /// @dev Audit finding 7 (vault side): the vault's views and withdrawals depend on IMD.balanceOf and revert
+    ///      with TransferFailed while it is unavailable; nothing is lost or mis-accounted afterwards.
+    function test_balanceOfRevertingBlocksViewsAndWithdrawalsOnly() public {
+        _fund(10 ether);
+        vm.mockCallRevert(IMD_ADDR, abi.encodeWithSignature("balanceOf(address)", address(vault)), "paused");
+        vm.expectRevert(LifeForceVault.TransferFailed.selector);
+        vault.inferenceReserve();
+        vm.prank(safe);
+        vm.expectRevert(LifeForceVault.TransferFailed.selector);
+        vault.withdrawInference(1);
+        vm.clearMockedCalls();
+        assertEq(vault.inferenceReserve(), 7 ether);
+        assertEq(vault.buybackReserve(), 3 ether);
+    }
+
     function testFuzz_clampNeverExceedsBalance(uint96 depositRaw, uint96 removeRaw, bool inferenceFirst) public {
         uint256 deposit = bound(depositRaw, 0, 1000 ether);
         _fund(deposit);

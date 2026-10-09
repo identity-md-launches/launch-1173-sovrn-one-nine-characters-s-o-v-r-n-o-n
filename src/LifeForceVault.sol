@@ -7,7 +7,8 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 
 /// @notice IMD accounting for inference and manual buybacks. Only the fixed Safe can withdraw.
 /// @dev IMD is an ERC-20, so the vault cannot react to deposits: reserves are derived from its IMD balance.
-///      Reserves never sum to more than the balance actually held (a shortfall reduces buyback first).
+///      The two reserves always sum to exactly the balance held (a shortfall reduces buyback first and does not
+///      change what is checkpointed, so returned IMD restores the original split).
 contract LifeForceVault is Guard {
     address public constant IMD = 0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127;
     address public constant REFUEL_SAFE = 0xEb57c52272B90F989C41B739e2ccc5f00bF7697C;
@@ -61,29 +62,23 @@ contract LifeForceVault is Guard {
 
     /// @notice Anyone may checkpoint IMD that arrived since the last checkpoint. Views already include it.
     function sync() external nonReentrant {
-        uint256 tracked = inference + buyback;
-        (uint256 newInference, uint256 newBuyback) = _reserves();
-        uint256 seen = newInference + newBuyback;
-        inference = newInference;
-        buyback = newBuyback;
-        if (seen > tracked) {
-            uint256 added = seen - tracked;
-            uint256 addedBuyback = _buybackShare(added);
-            emit LifeForceFunded(address(0), added, added - addedBuyback, addedBuyback);
-        }
+        (uint256 added, uint256 addedBuyback) = _checkpoint();
+        if (added != 0) emit LifeForceFunded(address(0), added, added - addedBuyback, addedBuyback);
     }
 
     function withdrawInference(uint256 amount) external onlySafe nonReentrant {
-        (inference, buyback) = _reserves();
-        if (amount > inference) revert InvalidAmount();
+        _checkpoint();
+        (uint256 available,) = _reserves();
+        if (amount > available) revert InvalidAmount();
         inference -= amount;
         _sendIMD(REFUEL_SAFE, amount);
         emit InferenceWithdrawn(amount);
     }
 
     function withdrawBuyback(uint256 amount) external onlySafe nonReentrant {
-        (inference, buyback) = _reserves();
-        if (amount > buyback) revert InvalidAmount();
+        _checkpoint();
+        (, uint256 available) = _reserves();
+        if (amount > available) revert InvalidAmount();
         buyback -= amount;
         _sendIMD(REFUEL_SAFE, amount);
         emit BuybackWithdrawn(amount);
@@ -95,6 +90,20 @@ contract LifeForceVault is Guard {
         // The immutable launch token has plain transfers and no callbacks.
         if (!token.transfer(token.DEAD(), amount)) revert InvalidAmount();
         emit Burned(amount);
+    }
+
+    /// @dev Records IMD that arrived since the last checkpoint, split 70/30. It only ever raises the checkpoints:
+    ///      while the balance is below them (a shortfall) they are left alone, so IMD that later returns restores
+    ///      the original split no matter who called sync() or when.
+    function _checkpoint() private returns (uint256 added, uint256 addedBuyback) {
+        uint256 balance = _imdBalance();
+        uint256 tracked = inference + buyback;
+        if (balance > tracked) {
+            added = balance - tracked;
+            addedBuyback = _buybackShare(added);
+            inference += added - addedBuyback;
+            buyback += addedBuyback;
+        }
     }
 
     /// @dev Reserves = checkpointed reserves + any untracked IMD (split 70/30), clamped to the real balance.
@@ -109,7 +118,6 @@ contract LifeForceVault is Guard {
         }
         inferenceOut = inference > balance ? balance : inference;
         buybackOut = balance - inferenceOut;
-        if (buybackOut > buyback) buybackOut = buyback;
     }
 
     function _buybackShare(uint256 amount) private pure returns (uint256) {

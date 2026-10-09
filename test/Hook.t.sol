@@ -38,6 +38,15 @@ contract HookTest is SystemBase {
         if (!buy && amount > 0) assertLe(uint256(int256(_imdLeg(d))), uint256(amount));
     }
 
+    /// @dev Audit finding 7: a swap whose IMD leg rounds to a zero fee must not depend on IMD.balanceOf.
+    function test_zeroFeeSwapDoesNotReadIMDBalance() public {
+        vm.mockCallRevert(IMD_ADDR, abi.encodeWithSignature("balanceOf(address)", address(manager)), "paused");
+        uint256 vaultBefore = _vaultIMD();
+        BalanceDelta d = _trade(false, -1, 1461446703485210103287273052203988822378723970341);
+        assertEq(_imdLeg(d), 0);
+        assertEq(_vaultIMD(), vaultBefore);
+    }
+
     function test_feeAllFourModes() public {
         _checkFee(true, -0.1 ether, 4295128740);
         _checkFee(true, 10_000 ether, 4295128740);

@@ -215,8 +215,10 @@ contract SovrnHook {
             fee = buy ? actual * rate / (WAD - rate) : actual * rate / WAD;
         }
         uint256 gross = buy ? actual + fee : actual;
-        bool asClaim = _imdBalanceOf(address(poolManager)) < fee;
+        bool asClaim;
         if (fee != 0) {
+            // The balance is only read when there is a fee to take, so a zero-fee swap never depends on it.
+            asClaim = _imdBalanceOf(address(poolManager)) < fee;
             if (asClaim) {
                 poolManager.mint(address(this), CurrencyLibrary.toId(Currency.wrap(IMD)), fee);
                 claimFees += fee;
